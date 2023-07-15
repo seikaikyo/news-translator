@@ -1,16 +1,20 @@
+import os
+import time
+import feedparser
 import openai
 from html import escape
-from bs4 import BeautifulSoup
-import requests
-import feedparser
-import time
-import os
+from jinja2 import Environment, FileSystemLoader
 
 # Your OpenAI API key
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Set the OpenAI API key
+# Ensure API key is present
+if not OPENAI_API_KEY:
+    raise ValueError(
+        "Missing OpenAI API key. Please set it as an environment variable.")
+
 openai.api_key = OPENAI_API_KEY
+
 
 # News RSS feeds
 NEWS_FEEDS = {
@@ -79,106 +83,63 @@ def translate_text(text, target_language="zh-TW"):
 
 def fetch_news():
     """Fetch news from RSS feeds and translate to Traditional Chinese."""
+    news_data = {}
     request_counter = 0
-    html_output = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="utf-8">
-            <title>News Template</title>
-            <meta content="width=device-width, initial-scale=1.0" name="viewport">
-            <meta content="News Template" name="keywords">
-            <meta content="News Template" name="description">
-
-            <!-- Favicon -->
-            <link href="img/favicon.ico" rel="icon">
-
-            <!-- Google Fonts -->
-            <link href="https://fonts.googleapis.com/css?family=Montserrat:400,600&display=swap" rel="stylesheet"> 
-
-            <!-- CSS Libraries -->
-            <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rel="stylesheet">
-            <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.10.0/css/all.min.css" rel="stylesheet">
-            <link href="lib/slick/slick.css" rel="stylesheet">
-            <link href="lib/slick/slick-theme.css" rel="stylesheet">
-
-            <!-- Template Stylesheet -->
-            <link href="css/style.css" rel="stylesheet">
-        </head>
-
-        <body>
-            <!-- Single News Start-->
-            <div class="single-news">
-                <div class="container">
-                    <div class="row">
-                        <div class="col-lg-8">
-                            <div class="sn-container">
-                                <!-- News content will be generated here -->
-                            </div>
-                        </div>
-
-                        <div class="col-lg-4">
-                            <div class="sidebar">
-                                <!-- Sidebar content will be generated here -->
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <!-- Single News End-->
-        </body>
-        </html>
-    """
 
     for country, feeds in NEWS_FEEDS.items():
-        html_output += f"<h1 style='font-size: 24px; margin-top: 30px;'>Fetching news from {country}...</h1>"
+        news_list = []
         for feed in feeds:
             print(f"Fetching news from {feed}...")
-            d = feedparser.parse(feed)
+            try:
+                d = feedparser.parse(feed)
+            except Exception as e:
+                print(f"Error parsing feed {feed}: {e}")
+                continue
+
             for entry in d.entries[:NEWS_PER_FEED]:
-                if request_counter >= API_REQUEST_LIMIT:
-                    print(
-                        f"Reached the request limit of {API_REQUEST_LIMIT}. Stopping further requests.")
-                    break
-                translated_title = translate_text(entry.title)
-                html_output += f"<h2 style='font-size: 20px; margin-top: 20px;'><a href='{entry.link}' style='text-decoration: none; color: #0053a0;'>{escape(translated_title)}</a></h2>"
-                if 'description' in entry:
+                news_item = {
+                    'link': entry.link,
+                    'title': escape(entry.title),
+                }
+
+                if request_counter < API_REQUEST_LIMIT and 'description' in entry:
                     paragraphs = entry.description.split("\n\n")[
                         :MAX_PARAGRAPHS]
                     full_content = " ".join(paragraphs)
-                    try:
-                        # 檢查是否以「Translated summary:」開頭
-                        if full_content.startswith("Translated summary:"):
-                            continue  # 跳過這個項目
-                        html_output += f"<p>{translate_text(full_content)}</p>"
-                        request_counter += 1
-                    except openai.error.ServiceUnavailableError:
-                        print("OpenAI server is busy. Retrying in 5 seconds...")
-                        time.sleep(5)
-                        # 檢查是否以「Translated summary:」開頭
-                        if full_content.startswith("Translated summary:"):
-                            continue  # 跳過這個項目
-                        html_output += f"<p>{translate_text(full_content)}</p>"
-                        request_counter += 1
 
-    html_output += "</body></html>"
+                    # 檢查是否以「Translated summary:」開頭
+                    if not full_content.startswith("Translated summary:"):
+                        news_item['description'] = translate_text(full_content)
+                        request_counter += 1
+                    else:
+                        news_item['description'] = full_content
+                else:
+                    print(
+                        f"Reached the request limit of {API_REQUEST_LIMIT}. Skipping further translation requests but continuing to fetch news.")
+                    if 'description' in entry:
+                        paragraphs = entry.description.split("\n\n")[
+                            :MAX_PARAGRAPHS]
+                        news_item['description'] = " ".join(paragraphs)
+                news_list.append(news_item)
+
+        news_data[country] = news_list
+
+    return news_data
+
+
+def generate_html(news_data):
+    """Generate HTML output using a Jinja2 template."""
+    file_loader = FileSystemLoader('.')
+    env = Environment(loader=file_loader)
+
+    template = env.get_template('news_template.html')
+
+    output = template.render(news=news_data)
 
     with open("news_output.html", "w") as f:
-        f.write(html_output)
-
-
-def beautify_html():
-    """Load and beautify the generated HTML file."""
-    with open("news_output.html", "r") as f:
-        html_content = f.read()
-        soup = BeautifulSoup(html_content, "html.parser")
-
-        # 在這裡可以使用 BeautifulSoup 的功能修改和美化 HTML 的結構和樣式
-
-    with open("news_output.html", "w") as f:
-        f.write(soup.prettify())
+        f.write(output)
 
 
 if __name__ == "__main__":
-    fetch_news()
-    beautify_html()
+    news_data = fetch_news()
+    generate_html(news_data)
